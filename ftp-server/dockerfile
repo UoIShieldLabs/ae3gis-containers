@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     vsftpd \
     rsyslog \
     openssh-server \
+    openssh-client \
+    sshpass \
     net-tools \
     iproute2 \
     iputils-ping \
