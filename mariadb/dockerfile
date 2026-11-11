@@ -21,6 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     mariadb-server \
     nmap \
     netcat-openbsd \
+    openssh-client \
+    sshpass \
     python3 \
     python3-venv \
     && rm -rf /var/lib/apt/lists/*
@@ -35,6 +37,13 @@ ENV PATH="/opt/venv/bin:$PATH"
 # on this pivot can drive the RTU without a script.
 COPY breaker /usr/local/bin/breaker
 RUN chmod +x /usr/local/bin/breaker
+
+# Planted "secret sprawl" (lab-only, deliberate): the OT data-collector config
+# stores a reused OT service-account credential. An intruder who reaches this
+# historian can loot it, and the same password opens OT hosts (credential reuse).
+RUN mkdir -p /etc/ot-collector
+COPY collector.conf /etc/ot-collector/collector.conf
+RUN chmod 644 /etc/ot-collector/collector.conf
 
 # SSH setup: root password + allow root/password login (lab-only, deliberate)
 RUN mkdir /var/run/sshd && \
