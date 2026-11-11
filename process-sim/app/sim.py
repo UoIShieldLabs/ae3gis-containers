@@ -7,6 +7,12 @@ both scenarios, chosen by SIM_PROTO:
   - modbus : read a register/coil from the PLC (OpenPLC, Scenario A)
   - iec104 : read the breaker point from the RTU (c104-server, Scenario B)
 
+For Scenario B the page renders a small substation readout derived from the
+breaker state: when the breaker is CLOSED the feeder is ENERGIZED and shows
+nominal powered%/current/voltage; when it is OPEN everything collapses to zero
+(the city goes DARK). The electrical values are a simple illustrative model, not
+a power-flow solver — nominal constants are env-overridable.
+
 Built to stay up: every poll is guarded, and the view keeps the last known value
 and marks it stale rather than crashing. Educational, isolated-lab use.
 """
@@ -31,6 +37,11 @@ MODBUS_KIND = os.environ.get("MODBUS_KIND", "holding")  # holding | coil
 IEC104_PORT = int(os.environ.get("FIELD_PORT", "2404"))
 IEC104_COMMON_ADDRESS = int(os.environ.get("IEC104_COMMON_ADDRESS", "47"))
 IEC104_STATE_IOA = int(os.environ.get("BREAKER_STATE_IOA", "11"))
+
+# Derived electrical readout (illustrative). Shown when the feeder is energized;
+# all values collapse to zero when the breaker opens.
+FEEDER_CURRENT_A = float(os.environ.get("FEEDER_CURRENT_A", "420"))
+FEEDER_VOLTAGE_KV = float(os.environ.get("FEEDER_VOLTAGE_KV", "11.0"))
 
 _lock = threading.Lock()
 _state = {"value": None, "updated": 0.0, "ok": False}
@@ -96,24 +107,64 @@ def poll_iec104() -> None:
 
 app = Flask(__name__)
 
-PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<title>Process view</title><meta http-equiv="refresh" content="2">
-<style>body{{font-family:system-ui,sans-serif;margin:0;height:100vh;display:flex;
-flex-direction:column;align-items:center;justify-content:center;background:#0b1021;color:#e8eaf6}}
-.v{{font-size:22vmin;font-weight:800;line-height:1}}
-.meta{{margin-top:2rem;font-size:1.2rem;color:#9fa8da}}
-.stale{{color:#ff8a80}}</style></head><body>
-<div class="v">{value}</div>
-<div class="meta {stalecls}">{proto} · {host} · {freshness}</div>
+# A projector-friendly dark page: one big status word, three derived metrics, and
+# a telemetry/freshness footer. No external assets (the page may be relayed
+# through the backend web-UI proxy), so styling is inline. Values are substituted
+# with str.replace to keep the CSS brace-free (like the HMI page).
+PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Substation feeder</title><meta http-equiv="refresh" content="2">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:3vmin;font-family:system-ui,-apple-system,sans-serif;
+    background:#0b1021;color:#e8eaf6}
+  .status{font-size:16vmin;font-weight:800;line-height:1;letter-spacing:.02em;color:var(--c)}
+  .sub{font-size:2.2vmin;letter-spacing:.32em;text-transform:uppercase;color:#9fa8da;margin-top:-2vmin}
+  .metrics{display:flex;gap:7vmin;margin-top:1vmin}
+  .metric{display:flex;flex-direction:column;align-items:center;gap:.6vmin}
+  .m-val{font-size:6vmin;font-weight:700;color:var(--c)}
+  .m-lab{font-size:1.7vmin;letter-spacing:.22em;text-transform:uppercase;color:#7d8ea3}
+  .meta{margin-top:2vmin;font-size:1.6vmin;color:#6b7a90;font-family:ui-monospace,monospace;letter-spacing:.05em}
+  .meta.stale{color:#ff8a80}
+  .energized{--c:#2fd27a}
+  .dark{--c:#ff5a5a}
+  .unknown{--c:#9fb0c3}
+</style></head>
+<body class="__KEY__">
+  <div class="status">__STATUS__</div>
+  <div class="sub">__SUB__</div>
+  <div class="metrics">
+    <div class="metric"><div class="m-val">__POWERED__</div><div class="m-lab">Powered</div></div>
+    <div class="metric"><div class="m-val">__CURRENT__</div><div class="m-lab">Line current</div></div>
+    <div class="metric"><div class="m-val">__VOLTAGE__</div><div class="m-lab">Bus voltage</div></div>
+  </div>
+  <div class="meta __STALECLS__">__PROTO__ · __HOST__ · __FRESH__</div>
 </body></html>"""
+
+
+def _readout(value):
+    """Map the polled field value to (key, status, sub, powered, current, voltage)."""
+    energized = value is True or (isinstance(value, (int, float))
+                                  and not isinstance(value, bool) and value != 0)
+    de_energized = value is False or (isinstance(value, (int, float))
+                                      and not isinstance(value, bool) and value == 0)
+    if energized:
+        return ("energized", "ENERGIZED", "feeder online",
+                "100%", f"{FEEDER_CURRENT_A:.0f} A", f"{FEEDER_VOLTAGE_KV:.1f} kV")
+    if de_energized:
+        return ("dark", "DARK", "feeder de-energized", "0%", "0 A", "0 kV")
+    return ("unknown", "—", "awaiting field device", "—", "—", "—")
 
 
 @app.route("/")
 def index() -> str:
     with _lock:
         value, updated, ok = _state["value"], _state["updated"], _state["ok"]
-    shown = "—" if value is None else ("CLOSED" if value is True
-                                       else "OPEN" if value is False else str(value))
+
+    key, status, sub, powered, current, voltage = _readout(value)
+
     if not updated:
         freshness, stalecls = "no data yet", "stale"
     else:
@@ -121,9 +172,24 @@ def index() -> str:
         fresh = ok and age < POLL_SECONDS * 3
         freshness = "live" if fresh else f"stale ({int(age)}s)"
         stalecls = "" if fresh else "stale"
+
     target = f"{FIELD_HOST}:{MODBUS_PORT if PROTO == 'modbus' else IEC104_PORT}"
-    return PAGE.format(value=shown, proto=PROTO, host=target,
-                       freshness=freshness, stalecls=stalecls)
+    repl = {
+        "__KEY__": key,
+        "__STATUS__": status,
+        "__SUB__": sub,
+        "__POWERED__": powered,
+        "__CURRENT__": current,
+        "__VOLTAGE__": voltage,
+        "__STALECLS__": stalecls,
+        "__PROTO__": PROTO,
+        "__HOST__": target,
+        "__FRESH__": freshness,
+    }
+    page = PAGE
+    for token, replacement in repl.items():
+        page = page.replace(token, replacement)
+    return page
 
 
 if PROTO == "iec104":
