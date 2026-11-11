@@ -18,7 +18,7 @@ c104-hmi           v0.2     linux/amd64,linux/arm64
 process-sim        v0.3     linux/amd64,linux/arm64
 zeek               v0.2     linux/amd64,linux/arm64
 # More lab images (also built by AE3GIS from this repo; published so nodes can pull them)
-smb                v0.1     linux/amd64,linux/arm64
+smb                v0.2     linux/amd64,linux/arm64
 isc-dhcp-server    v0.1     linux/amd64,linux/arm64
 firefox            v0.4     linux/amd64,linux/arm64
 wazuh/wazuh-agent  v0.1     linux/amd64,linux/arm64

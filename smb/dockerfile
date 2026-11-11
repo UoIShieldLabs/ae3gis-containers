@@ -13,6 +13,8 @@ RUN sed -i 's|^# deb-src|deb-src|' /etc/apt/sources.list && \
       wget \
       git \
       openssh-server \
+      openssh-client \
+      sshpass \
       rsyslog \
       net-tools \
       iproute2 \
@@ -60,6 +62,11 @@ RUN printf 'export PATH=/usr/local/samba/bin:/usr/local/samba/sbin:$PATH\n' \
 # Copy minimal smb.conf
 RUN mkdir -p /usr/local/samba/etc
 COPY smb.conf /usr/local/samba/etc/smb.conf
+
+# A reused credential also valid over SMB (root/pass) — the same lab password used
+# for SSH. Lets an intruder authenticate to the share with reused creds, teaching
+# credential reuse across protocols. Guest access to [tmp] still works regardless.
+RUN printf 'pass\npass\n' | /usr/local/samba/bin/smbpasswd -a -s root || true
 
 # Expose SSH + SMB ports
 EXPOSE 22 139 445
