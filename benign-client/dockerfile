@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bind9-dnsutils \
     nmap \
     netcat-openbsd \
+    openssh-client \
+    sshpass \
     isc-dhcp-client \
     && rm -rf /var/lib/apt/lists/*
 
@@ -37,12 +39,23 @@ RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir c104
 COPY breaker /usr/local/bin/breaker
 RUN chmod +x /usr/local/bin/breaker
 
+# LAB-ONLY planted weakness: this engineering workstation trusts the OT engineering
+# SSH key, whose private half sits on the historian. Looting that key (Industroyer
+# case study) lets the intruder log in here without the password. Throwaway lab key.
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+COPY ot_engineering_key.pub /root/.ssh/authorized_keys
+RUN chmod 600 /root/.ssh/authorized_keys
+
 # SSH setup: root password + allow root/password login
 RUN mkdir /var/run/sshd && \
     echo 'root:pass' | chpasswd && \
     sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
-    sed -i 's/^#\?UsePAM.*/UsePAM no/' /etc/ssh/sshd_config
+    sed -i 's/^#\?UsePAM.*/UsePAM no/' /etc/ssh/sshd_config && \
+    mkdir -p /etc/ssh/ssh_config.d && printf '%s\n' \
+      'Host hmi' '  HostName 10.0.3.30' 'Host rtu' '  HostName 10.0.3.50' \
+      'Host *' '  StrictHostKeyChecking no' '  UserKnownHostsFile /dev/null' '  LogLevel ERROR' \
+      > /etc/ssh/ssh_config.d/99-lab.conf
 
 # Expose SSH port
 EXPOSE 22
