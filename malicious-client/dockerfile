@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y \
     procps \
     nmap \
     netcat-openbsd \
+    openssh-client \
     sshpass \
     smbclient \
     hydra \
@@ -32,6 +33,25 @@ RUN mkdir /var/run/sshd && \
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
     sed -i 's/^#\?UsePAM.*/UsePAM no/' /etc/ssh/sshd_config
 
+# The attacker's staged ICS toolkit (used by the Industroyer case-study tutorial):
+# a loud, explainable IEC-104 payload and a symbolic data wiper. Harmless by design
+# (see each file's header); carried here as the adversary/C2's authored tooling and
+# dropped onto the engineering workstation / HMI during the attack.
+COPY ics/ /opt/ics/
+RUN chmod +x /opt/ics/industroyer104.py /opt/ics/ics-wiper.sh && \
+    chmod 600 /opt/ics/attacker_key
+
+# Clean SSH client config: friendly lab host aliases + no host-key prompts, so the
+# tutorial's commands read `ssh user@gateway` instead of a wall of -o flags.
+RUN mkdir -p /etc/ssh/ssh_config.d && printf '%s\n' \
+    'Host fileserver' '  HostName 10.0.5.30' \
+    'Host gateway'    '  HostName 10.0.4.20' \
+    'Host historian'  '  HostName 10.0.4.30' \
+    'Host ew'         '  HostName 10.0.3.15' \
+    'Host rtu'        '  HostName 10.0.3.50' \
+    'Host *' '  StrictHostKeyChecking no' '  UserKnownHostsFile /dev/null' '  LogLevel ERROR' \
+    > /etc/ssh/ssh_config.d/99-lab.conf
+
 # Expose SSH port
 EXPOSE 22
 
@@ -40,7 +60,7 @@ CMD ["sh", "-c", "rsyslogd && exec /usr/sbin/sshd -D"]
 
 # AE3GIS image metadata (see image-standard.md)
 LABEL org.opencontainers.image.title="Attack toolkit" \
-      org.opencontainers.image.description="Ubuntu 24.04 with nmap, hydra, john, netcat, smbclient and sshpass (for the SMB weak-cred and credential-reuse pivots)." \
+      org.opencontainers.image.description="Ubuntu 24.04 attack toolkit: nmap, hydra, john, netcat, smbclient, ssh/sshpass, plus a staged IEC-104 payload and symbolic wiper in /opt/ics (Industroyer case study)." \
       io.ae3gis.schema="1" \
       io.ae3gis.type="attacker" \
       io.ae3gis.default="true"

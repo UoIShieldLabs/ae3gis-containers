@@ -1,0 +1,10 @@
+admin
+123456
+password
+12345
+root
+toor
+raspberry
+default
+admin123
+changeme
