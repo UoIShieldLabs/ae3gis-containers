@@ -35,6 +35,11 @@ RUN mkdir /var/run/sshd && \
 
 COPY app/server.py /opt/app/server.py
 
+# A one-word breaker tool (status|open|close) over IEC-104, so an operator can drive
+# the breaker *locally at the RTU* when the HMI has been knocked out (manual recovery).
+COPY breaker /usr/local/bin/breaker
+RUN chmod +x /usr/local/bin/breaker
+
 EXPOSE 22 2404
 
 # Start logging + SSH in the background, then run the RTU in the foreground.
@@ -42,7 +47,7 @@ CMD ["sh", "-c", "rsyslogd; service ssh start; exec python3 /opt/app/server.py"]
 
 # AE3GIS image metadata (see image-standard.md)
 LABEL org.opencontainers.image.title="IEC-104 RTU" \
-      org.opencontainers.image.description="Ubuntu 24.04 IEC-104 substation RTU (c104) exposing one breaker on TCP 2404. SSH root/pass." \
+      org.opencontainers.image.description="Ubuntu 24.04 IEC-104 substation RTU (c104) on TCP 2404: one breaker (M_SP/C_SC) plus derived current/voltage measured values (M_ME); 'breaker' CLI for local recovery. SSH root/pass." \
       io.ae3gis.schema="1" \
       io.ae3gis.type="plc" \
       io.ae3gis.stability="experimental"
