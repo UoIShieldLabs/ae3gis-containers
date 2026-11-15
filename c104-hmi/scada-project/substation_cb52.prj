@@ -1,0 +1,5 @@
+# SCADA operator project — Substation CB-52 (LAB dummy file)
+project    = cb52_feeder
+rtu        = 10.0.3.50:2404
+common_addr= 47
+revision   = 7

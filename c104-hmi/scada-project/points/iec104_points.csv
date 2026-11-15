@@ -1,0 +1,5 @@
+ioa,type,name,unit
+11,M_SP_NA_1,breaker_cb52,-
+12,C_SC_NA_1,breaker_cb52_cmd,-
+13,M_ME_NC_1,feeder_current,A
+14,M_ME_NC_1,bus_voltage,kV

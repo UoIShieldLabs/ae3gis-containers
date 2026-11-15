@@ -35,18 +35,25 @@ RUN mkdir /var/run/sshd && \
 
 COPY app/hmi.py /opt/app/hmi.py
 
+# A dummy operator SCADA project (points, mimics, config) in an isolated scratch
+# directory. The Industroyer case-study wiper enumerates and destroys these files
+# inside this container only - modelling denial of view. Nothing real depends on it.
+COPY scada-project/ /opt/scada-project/
+
 # Point this at the RTU at runtime (default matches the c104-server image)
 ENV IEC104_SERVER=c104-server \
     IEC104_PORT=2404
 
 EXPOSE 22 8080
 
-# Start logging + SSH in the background, then run the HMI (Flask) in the foreground.
-CMD ["sh", "-c", "rsyslogd; service ssh start; exec python3 /opt/app/hmi.py"]
+# Start logging + SSH, then run the HMI (Flask) as a CHILD (not PID 1) so the wiper
+# can kill the operator console without taking the whole container down (keeping the
+# node present for the recovery narration). The container's main process is a wait.
+CMD ["sh", "-c", "rsyslogd; service ssh start; python3 /opt/app/hmi.py & exec tail -f /dev/null"]
 
 # AE3GIS image metadata (see image-standard.md)
 LABEL org.opencontainers.image.title="IEC-104 HMI" \
-      org.opencontainers.image.description="Ubuntu 24.04 IEC-104 operator console (c104 + Flask): shows and controls the RTU breaker on a web page (8080). SSH root/pass." \
+      org.opencontainers.image.description="Ubuntu 24.04 IEC-104 operator console (c104 + Flask): shows the RTU breaker plus current/voltage and controls it on a web page (8080); carries a dummy SCADA project for the wiper demo. SSH root/pass." \
       io.ae3gis.schema="1" \
       io.ae3gis.type="hmi" \
       io.ae3gis.stability="experimental"

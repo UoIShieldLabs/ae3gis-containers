@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""IEC-104 operator console (HMI) for the AE3GIS lab (Scenario B).
+"""IEC-104 operator console (HMI) for the AE3GIS lab (Industroyer case study).
 
 Connects to the RTU (the c104-server image) as an IEC-104 client, tracks the
-breaker state via periodic general interrogation, and serves a small web console
-on :8080 that shows the breaker state and offers open/close controls.
+breaker state and the derived line-current / bus-voltage measured values via
+periodic general interrogation, and serves a small web console on :8080 that shows
+them and offers open/close controls.
 
 The c104 client setup runs in a retrying background thread (c104 needs a numeric
 IP, and the RTU may not be up yet), so the web view always stays up. Educational,
@@ -23,9 +24,11 @@ WEB_PORT = int(os.environ.get("HMI_WEB_PORT", "8080"))
 COMMON_ADDRESS = int(os.environ.get("IEC104_COMMON_ADDRESS", "47"))
 STATE_IOA = int(os.environ.get("BREAKER_STATE_IOA", "11"))
 CMD_IOA = int(os.environ.get("BREAKER_CMD_IOA", "12"))
+CURRENT_IOA = int(os.environ.get("FEEDER_CURRENT_IOA", "13"))
+VOLTAGE_IOA = int(os.environ.get("FEEDER_VOLTAGE_IOA", "14"))
 
 _lock = threading.Lock()
-_ctx = {"command": None, "breaker": None, "connection": None}
+_ctx = {"command": None, "breaker": None, "current": None, "voltage": None, "connection": None}
 
 
 def _resolve(host: str) -> str:
@@ -43,8 +46,11 @@ def worker() -> None:
     station = connection.add_station(common_address=COMMON_ADDRESS)
     breaker = station.add_point(io_address=STATE_IOA, type=c104.Type.M_SP_NA_1)
     command = station.add_point(io_address=CMD_IOA, type=c104.Type.C_SC_NA_1)
+    current = station.add_point(io_address=CURRENT_IOA, type=c104.Type.M_ME_NC_1)
+    voltage = station.add_point(io_address=VOLTAGE_IOA, type=c104.Type.M_ME_NC_1)
     with _lock:
-        _ctx.update(command=command, breaker=breaker, connection=connection)
+        _ctx.update(command=command, breaker=breaker, current=current,
+                    voltage=voltage, connection=connection)
     client.start()
     while True:
         try:
@@ -59,10 +65,10 @@ threading.Thread(target=worker, daemon=True).start()
 
 app = Flask(__name__)
 
-# A small dark console: one clear state panel and the open/close controls.
-# No external assets (the page is relayed through the backend's web-UI proxy),
-# so styling is inline. Dynamic values are substituted with str.replace to keep
-# the CSS brace-free.
+# A small dark console: a breaker-state panel, the live current/voltage readout,
+# and the open/close controls. No external assets (the page is relayed through the
+# backend's web-UI proxy), so styling is inline. Dynamic values are substituted
+# with str.replace to keep the CSS brace-free.
 PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -82,6 +88,10 @@ PAGE = """<!doctype html>
   .panel svg{width:40px;height:40px}
   .label{font-size:26px;font-weight:800;letter-spacing:.06em;color:var(--c)}
   .sub{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#7d8ea3}
+  .meas{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0 0 16px}
+  .meas .m{padding:10px 8px;border-radius:9px;background:#0f1722;border:1px solid #1e2a3a}
+  .meas .v{font-size:20px;font-weight:700;color:var(--c)}
+  .meas .k{font-size:9px;letter-spacing:.16em;text-transform:uppercase;color:#7d8ea3;margin-top:3px}
   .p-closed{--c:#2fd27a;--bg:rgba(47,210,122,.10)}
   .p-open{--c:#ff5a5a;--bg:rgba(255,90,90,.10)}
   .p-unknown{--c:#9fb0c3;--bg:rgba(125,142,163,.08)}
@@ -104,6 +114,10 @@ PAGE = """<!doctype html>
       __GLYPH__
       <div class="label">__LABEL__</div>
       <div class="sub">__SUB__</div>
+    </div>
+    <div class="meas p-__DKEY__">
+      <div class="m"><div class="v">__CURRENT__</div><div class="k">Line current</div></div>
+      <div class="m"><div class="v">__VOLTAGE__</div><div class="k">Bus voltage</div></div>
     </div>
     <div class="controls">
       <form method="post" action="/close"><button class="btn-close" type="submit" style="width:100%">Close</button></form>
@@ -146,10 +160,19 @@ def send(value: bool) -> None:
         print(f"[c104-hmi] command failed: {exc}", flush=True)
 
 
+def _fmt(point, unit: str, known: bool) -> str:
+    """Format a measured value, or a dash when the state is unknown."""
+    if not known or point is None or point.value is None:
+        return "—"
+    return f"{point.value:.0f} {unit}" if unit == "A" else f"{point.value:.1f} {unit}"
+
+
 @app.route("/")
 def index() -> str:
     with _lock:
         breaker = _ctx["breaker"]
+        current = _ctx["current"]
+        voltage = _ctx["voltage"]
         connection = _ctx["connection"]
     val = breaker.value if breaker is not None else None
     if val is True:
@@ -159,6 +182,7 @@ def index() -> str:
     else:
         dkey, label, sub = "unknown", "UNKNOWN", "awaiting RTU"
 
+    known = val is not None
     conn = "connecting"
     if connection is not None:
         conn = "connected" if connection.is_connected else "disconnected"
@@ -168,6 +192,8 @@ def index() -> str:
         "__GLYPH__": _glyph(dkey),
         "__LABEL__": label,
         "__SUB__": sub,
+        "__CURRENT__": _fmt(current, "A", known),
+        "__VOLTAGE__": _fmt(voltage, "kV", known),
         "__CONN__": conn,
         "__TS__": time.strftime("%H:%M:%S"),
     }
