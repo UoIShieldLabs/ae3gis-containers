@@ -1,0 +1,11 @@
+# File-transfer broker -> historian reporting connection (LAB-ONLY).
+#
+# The DMZ gateway is a sanctioned IT<->OT file-transfer broker. As part of its job
+# it pushes nightly export summaries into the historian's database, so it keeps the
+# reporting account's credentials here. DELIBERATELY INSECURE: a world-readable
+# config holding DB credentials is the foothold an intruder on the gateway uses to
+# reach and dump the historian. Never store credentials like this in production.
+[client]
+host     = 10.0.4.30
+user     = report
+password = r3p0rt

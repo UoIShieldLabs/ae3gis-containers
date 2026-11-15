@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-server \
     openssh-client \
     sshpass \
+    mariadb-client \
     net-tools \
     iproute2 \
     iputils-ping \
@@ -20,12 +21,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
   && rm -rf /var/lib/apt/lists/*
 
-# SSH setup: root password + allow root/password login
+# SSH setup: root password + the sanctioned file-transfer SERVICE ACCOUNT `svc-ft`
+# (distinct credential) that the fileserver uses to push reports here over SFTP.
+# The intruder reuses svc-ft (found on the fileserver) to cross into the DMZ.
 RUN mkdir /var/run/sshd && \
     echo 'root:pass' | chpasswd && \
+    useradd -m -s /bin/bash svc-ft && echo 'svc-ft:Tr4nsf3r!' | chpasswd && \
     sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
-    sed -i 's/^#\?UsePAM.*/UsePAM no/' /etc/ssh/sshd_config
+    sed -i 's/^#\?UsePAM.*/UsePAM no/' /etc/ssh/sshd_config && \
+    mkdir -p /etc/ssh/ssh_config.d && printf '%s\n' \
+      'Host historian' '  HostName 10.0.4.30' 'Host ew' '  HostName 10.0.3.15' 'Host rtu' '  HostName 10.0.3.50' \
+      'Host *' '  StrictHostKeyChecking no' '  UserKnownHostsFile /dev/null' '  LogLevel ERROR' \
+      > /etc/ssh/ssh_config.d/99-lab.conf
 
 # Create FTP user and directories
 RUN useradd -m ftpuser && echo 'ftpuser:ftppass' | chpasswd && \
@@ -49,18 +57,27 @@ RUN cp /etc/vsftpd.conf /etc/vsftpd.conf.bak && \
 # vsftpd's secure_chroot_dir: the package only creates it at boot (tmpfiles.d), so every login fails without it
 RUN mkdir -p /var/run/vsftpd/empty
 
+# Planted (lab-only): the broker's historian reporting credentials. An intruder on
+# the gateway reads this to reach and dump the historian DB (secret sprawl).
+RUN mkdir -p /etc/filebroker
+COPY report.cnf /etc/filebroker/report.cnf
+RUN chmod 644 /etc/filebroker/report.cnf
+
 # Expose FTP and SSH ports
 EXPOSE 21 22
 
 # Healthcheck for vsftpd (port open)
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD bash -lc 'nc -z 127.0.0.1 21'
 
-# Start rsyslog, SSH (in background), then run vsftpd in the foreground
-CMD ["sh", "-c", "rsyslogd && /usr/sbin/sshd -D & exec /usr/sbin/vsftpd /etc/vsftpd.conf"]
+# Anchor the container on sshd (the critical pivot service) and run vsftpd in a
+# background restart loop. vsftpd can flakily segfault under some container/seccomp
+# setups; keeping it off the foreground means a crash can't take the whole node
+# (and its SSH pivot) down with it.
+CMD ["sh", "-c", "rsyslogd; (while true; do /usr/sbin/vsftpd /etc/vsftpd.conf; echo 'vsftpd exited, restarting' >&2; sleep 2; done) & exec /usr/sbin/sshd -D"]
 
 # AE3GIS image metadata (see image-standard.md)
 LABEL org.opencontainers.image.title="vsftpd" \
-      org.opencontainers.image.description="Ubuntu 24.04 + vsftpd; user ftpuser/ftppass, chrooted; SSH root/pass." \
+      org.opencontainers.image.description="Ubuntu 24.04 + vsftpd DMZ file-transfer broker; user ftpuser/ftppass, chrooted; mariadb-client + a planted historian report config (Industroyer case study); SSH root/pass." \
       io.ae3gis.schema="1" \
       io.ae3gis.type="ftp-server" \
       io.ae3gis.default="true"
