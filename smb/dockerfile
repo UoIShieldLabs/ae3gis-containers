@@ -63,10 +63,24 @@ RUN printf 'export PATH=/usr/local/samba/bin:/usr/local/samba/sbin:$PATH\n' \
 RUN mkdir -p /usr/local/samba/etc
 COPY smb.conf /usr/local/samba/etc/smb.conf
 
-# A reused credential also valid over SMB (root/pass) — the same lab password used
-# for SSH. Lets an intruder authenticate to the share with reused creds, teaching
-# credential reuse across protocols. Guest access to [tmp] still works regardless.
-RUN printf 'pass\npass\n' | /usr/local/samba/bin/smbpasswd -a -s root || true
+# Planted (lab-only): the nightly file-transfer job's config, holding the sanctioned
+# file-transfer service-account credential for the DMZ gateway. An intruder who lands
+# on the fileserver reuses it over the sanctioned SFTP channel to cross into the DMZ.
+RUN mkdir -p /etc/filetransfer
+COPY push.conf /etc/filetransfer/push.conf
+RUN chmod 644 /etc/filetransfer/push.conf
+
+# B3 accounts + clean ssh (placed after the Samba build to keep its cache): HARDEN
+# the root SSH password so a default-credential spray fails, add the `ftops` account
+# with a strong non-default password (so the intended way in is the SMB key-drop into
+# its home, not a guessed password), enable pubkey auth, and install the lab ssh config.
+RUN echo 'root:f1l3S3rv!' | chpasswd && \
+    useradd -m -s /bin/bash ftops && echo 'ftops:F!le0ps#2024' | chpasswd && \
+    sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config && \
+    printf '%s\n' 'Host gateway' '  HostName 10.0.4.20' 'Host historian' '  HostName 10.0.4.30' \
+      'Host ew' '  HostName 10.0.3.15' 'Host rtu' '  HostName 10.0.3.50' \
+      'Host *' '  StrictHostKeyChecking no' '  UserKnownHostsFile /dev/null' '  LogLevel ERROR' \
+      >> /etc/ssh/ssh_config
 
 # Expose SSH + SMB ports
 EXPOSE 22 139 445
@@ -80,7 +94,7 @@ CMD ["/bin/bash","-c", "\
 
 # AE3GIS image metadata (see image-standard.md)
 LABEL org.opencontainers.image.title="Samba 4.5.9 (vulnerable)" \
-      org.opencontainers.image.description="Deliberately vulnerable Samba 4.5.9 compiled from source on Ubuntu 16.04." \
+      org.opencontainers.image.description="Samba 4.5.9 (from source, Ubuntu 16.04) with a guest-writable home-dir share (SMB key-drop vector), hardened root SSH, an ftops key-login account, and a planted file-transfer service credential (Industroyer B3)." \
       io.ae3gis.schema="1" \
       io.ae3gis.type="file-server" \
       io.ae3gis.stability="experimental"
