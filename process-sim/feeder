@@ -1,0 +1,5 @@
+#!/bin/sh
+# feeder - one-shot terminal readout of the substation feeder (god-view CLI).
+# Prints ENERGIZED/DARK . powered % . line current . bus voltage, read live from
+# the RTU. A thin wrapper over the simulator's CLI mode.
+exec /opt/venv/bin/python3 /opt/app/sim.py status "$@"

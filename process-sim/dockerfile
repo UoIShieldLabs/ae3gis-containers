@@ -36,6 +36,11 @@ RUN mkdir /var/run/sshd && \
 
 COPY app/sim.py /opt/app/sim.py
 
+# `feeder` - a one-word terminal readout of the feeder (energized/dark . % . A . kV),
+# for a CLI "god-view" alongside the projector web page.
+COPY feeder /usr/local/bin/feeder
+RUN chmod +x /usr/local/bin/feeder
+
 # Scenario selection and field-device target (overridable at runtime):
 #   SIM_PROTO=modbus  -> read FIELD_HOST:502 (OpenPLC)   [Scenario A]
 #   SIM_PROTO=iec104  -> read FIELD_HOST:2404 (IEC-104 RTU) [Scenario B]

@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """Physical-process simulator + projector view for the AE3GIS lab.
 
-Polls the field device's true output and shows it on a big web page (:8000),
-so a demo can project the real process state next to the HMI. One image serves
-both scenarios, chosen by SIM_PROTO:
+Polls the field device's true output and shows it on a big web page (:8000), so a
+demo can project the real process state next to the HMI. One image serves both
+scenarios, chosen by SIM_PROTO:
   - modbus : read a register/coil from the PLC (OpenPLC, Scenario A)
-  - iec104 : read the breaker point from the RTU (c104-server, Scenario B)
+  - iec104 : read the breaker + current/voltage from the RTU (c104-server, Sc. B)
 
-For Scenario B the page renders a small substation readout derived from the
-breaker state: when the breaker is CLOSED the feeder is ENERGIZED and shows
-nominal powered%/current/voltage; when it is OPEN everything collapses to zero
-(the city goes DARK). The electrical values are a simple illustrative model, not
-a power-flow solver — nominal constants are env-overridable.
+For Scenario B the RTU is the single source of telemetry: this projector reads the
+breaker state (M_SP) and the derived line-current / bus-voltage measured values
+(M_ME) straight from the field device. CLOSED -> ENERGIZED with the RTU's reported
+current/voltage; OPEN -> DARK, everything zero. If an M_ME point is unavailable it
+falls back to a nominal constant so the view still renders.
 
-Built to stay up: every poll is guarded, and the view keeps the last known value
-and marks it stale rather than crashing. Educational, isolated-lab use.
+Also exposes a terminal readout: `feeder` (or `python3 sim.py status`) prints the
+same energized/dark . % . A . kV line for a CLI "god-view". Educational, isolated-lab use.
 """
 import os
 import socket
+import sys
 import threading
 import time
-
-from flask import Flask
 
 PROTO = os.environ.get("SIM_PROTO", "modbus").lower()
 WEB_PORT = int(os.environ.get("SIM_WEB_PORT", "8000"))
@@ -37,20 +36,24 @@ MODBUS_KIND = os.environ.get("MODBUS_KIND", "holding")  # holding | coil
 IEC104_PORT = int(os.environ.get("FIELD_PORT", "2404"))
 IEC104_COMMON_ADDRESS = int(os.environ.get("IEC104_COMMON_ADDRESS", "47"))
 IEC104_STATE_IOA = int(os.environ.get("BREAKER_STATE_IOA", "11"))
+IEC104_CURRENT_IOA = int(os.environ.get("FEEDER_CURRENT_IOA", "13"))
+IEC104_VOLTAGE_IOA = int(os.environ.get("FEEDER_VOLTAGE_IOA", "14"))
 
-# Derived electrical readout (illustrative). Shown when the feeder is energized;
-# all values collapse to zero when the breaker opens.
+# Fallback nominal readout (used when no measured value is available, e.g. Modbus
+# or an RTU without M_ME points). Shown only while energized.
 FEEDER_CURRENT_A = float(os.environ.get("FEEDER_CURRENT_A", "420"))
 FEEDER_VOLTAGE_KV = float(os.environ.get("FEEDER_VOLTAGE_KV", "11.0"))
 
 _lock = threading.Lock()
-_state = {"value": None, "updated": 0.0, "ok": False}
+_state = {"breaker": None, "current": None, "voltage": None, "updated": 0.0, "ok": False}
 
 
-def _set(value, ok: bool) -> None:
+def _set(breaker, current, voltage, ok: bool) -> None:
     with _lock:
-        if value is not None:
-            _state["value"] = value
+        if breaker is not None:
+            _state["breaker"] = breaker
+        _state["current"] = current
+        _state["voltage"] = voltage
         _state["ok"] = ok
         if ok:
             _state["updated"] = time.time()
@@ -69,9 +72,9 @@ def poll_modbus() -> None:
             else:
                 rr = client.read_holding_registers(MODBUS_ADDRESS, count=1)
                 value = None if rr.isError() else int(rr.registers[0])
-            _set(value, value is not None)
+            _set(value, None, None, value is not None)
         except Exception:
-            _set(None, False)
+            _set(None, None, None, False)
         time.sleep(POLL_SECONDS)
 
 
@@ -90,27 +93,79 @@ def poll_iec104() -> None:
     client = c104.Client()
     connection = client.add_connection(ip=_resolve(FIELD_HOST), port=IEC104_PORT)
     station = connection.add_station(common_address=IEC104_COMMON_ADDRESS)
-    point = station.add_point(io_address=IEC104_STATE_IOA, type=c104.Type.M_SP_NA_1)
+    breaker = station.add_point(io_address=IEC104_STATE_IOA, type=c104.Type.M_SP_NA_1)
+    current = station.add_point(io_address=IEC104_CURRENT_IOA, type=c104.Type.M_ME_NC_1)
+    voltage = station.add_point(io_address=IEC104_VOLTAGE_IOA, type=c104.Type.M_ME_NC_1)
     client.start()
     while True:
         try:
             if connection.is_connected:
                 connection.interrogation(common_address=IEC104_COMMON_ADDRESS)
-                val = point.value
-                _set(None if val is None else bool(val), val is not None)
+                b = breaker.value
+                _set(None if b is None else bool(b), current.value, voltage.value,
+                     b is not None)
             else:
-                _set(None, False)
+                _set(None, None, None, False)
         except Exception:
-            _set(None, False)
+            _set(None, None, None, False)
         time.sleep(POLL_SECONDS)
 
 
-app = Flask(__name__)
+def _readout(breaker, current, voltage):
+    """Map polled field values to (key, status, sub, powered, current_str, voltage_str)."""
+    energized = breaker is True or (isinstance(breaker, (int, float))
+                                    and not isinstance(breaker, bool) and breaker != 0)
+    de_energized = breaker is False or (isinstance(breaker, (int, float))
+                                        and not isinstance(breaker, bool) and breaker == 0)
+    if energized:
+        amps = current if isinstance(current, (int, float)) and current else FEEDER_CURRENT_A
+        kv = voltage if isinstance(voltage, (int, float)) and voltage else FEEDER_VOLTAGE_KV
+        return ("energized", "ENERGIZED", "feeder online",
+                "100%", f"{amps:.0f} A", f"{kv:.1f} kV")
+    if de_energized:
+        return ("dark", "DARK", "feeder de-energized", "0%", "0 A", "0 kV")
+    return ("unknown", "—", "awaiting field device", "—", "—", "—")
+
+
+def _snapshot():
+    with _lock:
+        return (_state["breaker"], _state["current"], _state["voltage"],
+                _state["updated"], _state["ok"])
+
+
+# ── CLI readout: `python3 sim.py status` (and the `feeder` wrapper) ─────────────
+def cli_status() -> int:
+    """One-shot terminal readout of the feeder, for a god-view CLI cell."""
+    if PROTO != "iec104":
+        print("feeder readout is only available for SIM_PROTO=iec104", file=sys.stderr)
+        return 2
+    import c104
+
+    client = c104.Client()
+    conn = client.add_connection(ip=_resolve(FIELD_HOST), port=IEC104_PORT)
+    station = conn.add_station(common_address=IEC104_COMMON_ADDRESS)
+    breaker = station.add_point(io_address=IEC104_STATE_IOA, type=c104.Type.M_SP_NA_1)
+    current = station.add_point(io_address=IEC104_CURRENT_IOA, type=c104.Type.M_ME_NC_1)
+    voltage = station.add_point(io_address=IEC104_VOLTAGE_IOA, type=c104.Type.M_ME_NC_1)
+    client.start()
+    time.sleep(2)
+    conn.interrogation(common_address=IEC104_COMMON_ADDRESS)
+    time.sleep(1)
+    _k, status, sub, powered, cur, volt = _readout(breaker.value, current.value, voltage.value)
+    print(f"feeder: {status}  ({sub}) · powered {powered} · {cur} · {volt}")
+    return 0
+
+
+app = None
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] in ("status", "feeder"):
+    sys.exit(cli_status())
+
+from flask import Flask  # noqa: E402  (deferred so the CLI path needs no Flask)
 
 # A projector-friendly dark page: one big status word, three derived metrics, and
-# a telemetry/freshness footer. No external assets (the page may be relayed
-# through the backend web-UI proxy), so styling is inline. Values are substituted
-# with str.replace to keep the CSS brace-free (like the HMI page).
+# a telemetry/freshness footer. No external assets (the page may be relayed through
+# the backend web-UI proxy), so styling is inline. Values are substituted with
+# str.replace to keep the CSS brace-free (like the HMI page).
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -143,27 +198,13 @@ PAGE = """<!doctype html>
   <div class="meta __STALECLS__">__PROTO__ · __HOST__ · __FRESH__</div>
 </body></html>"""
 
-
-def _readout(value):
-    """Map the polled field value to (key, status, sub, powered, current, voltage)."""
-    energized = value is True or (isinstance(value, (int, float))
-                                  and not isinstance(value, bool) and value != 0)
-    de_energized = value is False or (isinstance(value, (int, float))
-                                      and not isinstance(value, bool) and value == 0)
-    if energized:
-        return ("energized", "ENERGIZED", "feeder online",
-                "100%", f"{FEEDER_CURRENT_A:.0f} A", f"{FEEDER_VOLTAGE_KV:.1f} kV")
-    if de_energized:
-        return ("dark", "DARK", "feeder de-energized", "0%", "0 A", "0 kV")
-    return ("unknown", "—", "awaiting field device", "—", "—", "—")
+app = Flask(__name__)
 
 
 @app.route("/")
 def index() -> str:
-    with _lock:
-        value, updated, ok = _state["value"], _state["updated"], _state["ok"]
-
-    key, status, sub, powered, current, voltage = _readout(value)
+    breaker, current, voltage, updated, ok = _snapshot()
+    key, status, sub, powered, cur, volt = _readout(breaker, current, voltage)
 
     if not updated:
         freshness, stalecls = "no data yet", "stale"
@@ -179,8 +220,8 @@ def index() -> str:
         "__STATUS__": status,
         "__SUB__": sub,
         "__POWERED__": powered,
-        "__CURRENT__": current,
-        "__VOLTAGE__": voltage,
+        "__CURRENT__": cur,
+        "__VOLTAGE__": volt,
         "__STALECLS__": stalecls,
         "__PROTO__": PROTO,
         "__HOST__": target,
